@@ -942,13 +942,27 @@ func (c *RegionCache) SplitKeyRangesByBuckets(bo *Backoffer, ranges *KeyRanges) 
 		if pdErr != nil {
 			fields = append(fields, zap.Error(pdErr))
 		} else {
+			pdEpochChanged := pdLoc.Region.GetVer() != cachedLoc.Region.GetVer() ||
+				pdLoc.Region.GetConfVer() != cachedLoc.Region.GetConfVer()
+			pdBoundaryChanged := !bytes.Equal(pdLoc.StartKey, cachedLoc.StartKey) ||
+				!bytes.Equal(pdLoc.EndKey, cachedLoc.EndKey)
+			pdBucketVersionChanged := pdLoc.Buckets != nil &&
+				pdLoc.GetBucketVersion() != fallback.bucketVersion
+			staleConfirmed := pdEpochChanged || pdBoundaryChanged || pdBucketVersionChanged
+			// PD has superseded this cached location. Evict it before the
+			// region-only re-split below reads the cache again.
+			if staleConfirmed {
+				c.RegionCache.InvalidateCachedRegionWithReason(cachedLoc.Region, tikv.EpochNotMatch)
+			}
 			fields = append(fields,
 				zap.Uint64("pdRegionVer", pdLoc.Region.GetVer()),
 				zap.Uint64("pdRegionConfVer", pdLoc.Region.GetConfVer()),
 				keyField("pdRegionStartKey", pdLoc.StartKey),
 				keyField("pdRegionEndKey", pdLoc.EndKey),
-				zap.Bool("pdEpochChanged", pdLoc.Region.GetVer() != cachedLoc.Region.GetVer() || pdLoc.Region.GetConfVer() != cachedLoc.Region.GetConfVer()),
-				zap.Bool("pdBoundaryChanged", !bytes.Equal(pdLoc.StartKey, cachedLoc.StartKey) || !bytes.Equal(pdLoc.EndKey, cachedLoc.EndKey)),
+				zap.Bool("pdEpochChanged", pdEpochChanged),
+				zap.Bool("pdBoundaryChanged", pdBoundaryChanged),
+				zap.Bool("pdBucketVersionChanged", pdBucketVersionChanged),
+				zap.Bool("staleRegionInvalidated", staleConfirmed),
 			)
 			if pdLoc.Buckets != nil {
 				fields = append(fields,
